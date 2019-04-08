@@ -35,6 +35,7 @@
 #import <patchfinder64.h>
 #import <offsetcache.h>
 #import <kerneldec.h>
+#import <kernel_structs.h>
 #import "JailbreakViewController.h"
 #include "KernelStructureOffsets.h"
 #include "empty_list_sploit.h"
@@ -58,6 +59,7 @@
 #include "machswap_offsets.h"
 #include "machswap_pwn.h"
 #include "machswap2_pwn.h"
+#include "insert_dylib.h"
 
 @interface NSUserDefaults ()
 - (id)objectForKey:(id)arg1 inDomain:(id)arg2;
@@ -608,6 +610,73 @@ uint32_t find_macho_header(FILE *file) {
         magic = load_bytes(file, off, sizeof(uint32_t));
     }
     return off - 1;
+}
+
+int inject_persistent_dylib(const char *file, const char *dylib) {
+    int rv = 0;
+    if (access(file, F_OK) != ERR_SUCCESS) {
+        rv = -1;
+        goto out;
+    }
+    if (access(dylib, F_OK) != ERR_SUCCESS) {
+        rv = -2;
+        goto out;
+    }
+    const char *patched_file = [@(file) stringByAppendingString:@".patched"].UTF8String;
+    if (access(patched_file, F_OK) == ERR_SUCCESS) {
+        rv = 0;
+        goto out;
+    }
+    if (copyfile(file, patched_file, 0, COPYFILE_ALL) != ERR_SUCCESS) {
+        rv = -3;
+        goto out;
+    }
+    const char *insert_dylib_args[] = { "insert_dylib", "--all-yes", "--inplace", "--overwrite", dylib, patched_file, NULL };
+    if (insert_dylib_main(6, insert_dylib_args) != ERR_SUCCESS) {
+        rv = -4;
+        goto out;
+    }
+    if (runCommand("/usr/libexec/ldid", "-M", "-S", patched_file, NULL) != ERR_SUCCESS) {
+        rv = -5;
+        goto out;
+    }
+    if (injectTrustCache(@[@(patched_file)], GETOFFSET(trustcache), pmap_load_trust_cache) != ERR_SUCCESS) {
+        rv = -6;
+        goto out;
+    }
+    uint64_t original_file_vnode = vnodeForPath(file);
+    if (!ISADDR(original_file_vnode)) {
+        rv = -7;
+        goto out;
+    }
+    uint64_t patched_file_vnode = vnodeForPath(patched_file);
+    if (!ISADDR(patched_file_vnode)) {
+        rv = -8;
+        goto out;
+    }
+    struct vnode_struct rvp, fvp;
+    if (!rkbuffer(original_file_vnode, &rvp, sizeof(struct vnode_struct))) {
+        rv = -9;
+        goto out;
+    }
+    if (!rkbuffer(patched_file_vnode, &fvp, sizeof(struct vnode_struct))) {
+        rv = -10;
+        goto out;
+    }
+    fvp.v_usecount = rvp.v_usecount;
+    fvp.v_kusecount = rvp.v_kusecount;
+    fvp.v_parent = rvp.v_parent;
+    fvp.v_freelist = rvp.v_freelist;
+    fvp.v_mntvnodes = rvp.v_mntvnodes;
+    fvp.v_ncchildren = rvp.v_ncchildren;
+    fvp.v_nclinks = rvp.v_nclinks;
+    if (!wkbuffer(original_file_vnode, &fvp, sizeof(struct vnode_struct))) {
+        rv = -11;
+        goto out;
+    }
+out:
+    LOG("%s(%s, %s): %d", __FUNCTION__, file, dylib, rv);
+    return rv;
 }
 
 void jailbreak()
